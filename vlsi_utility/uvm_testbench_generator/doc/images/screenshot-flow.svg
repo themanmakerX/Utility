@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="240">
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <text x="20" y="30" font-family="Segoe UI" font-size="18" fill="#0E1726">UVM Testbench Generator - Workflow</text>
+  <rect x="20" y="50" width="180" height="120" fill="#F1F5F9" stroke="#D1D5DB"/>
+  <text x="40" y="80" font-family="Consolas" font-size="13">Import DUT</text>
+  <rect x="220" y="50" width="180" height="120" fill="#F1F5F9" stroke="#D1D5DB"/>
+  <text x="240" y="80" font-family="Consolas" font-size="13">Configure Interfaces</text>
+  <rect x="420" y="50" width="180" height="120" fill="#F1F5F9" stroke="#D1D5DB"/>
+  <text x="440" y="80" font-family="Consolas" font-size="13">Generate Files</text>
+</svg>
