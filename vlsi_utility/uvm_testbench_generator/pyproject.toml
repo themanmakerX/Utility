@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uvm-testbench-generator"
+version = "0.1.2"
+description = "Tkinter-based UVM testbench generator that scaffolds SystemVerilog testbenches from a DUT."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["pillow>=10"]
+license = { file = "LICENSE" }
+authors = [ { name = "atifafzal786" } ]
+keywords = ["uvm","systemverilog","testbench","generator","tkinter"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/atifafzal786/UVM-Testbench-Generator"
+Documentation = "https://github.com/atifafzal786/UVM-Testbench-Generator/tree/main"
+
+[project.scripts]
+tbgen = "uvm_testbench_generator.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["uvm_testbench_generator*"]
+
+[tool.setuptools.package-data]
+uvm_testbench_generator = ["logo/*.png", "logo/*.gif", "logo/*.ico"]

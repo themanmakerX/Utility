@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grepper"
+version = "0.1.1"
+description = "A lightweight Tkinter GUI tool to search folders/files and (optionally) file content."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "atifafzal786" }]
+keywords = ["search", "grep", "tkinter", "utility", "gui"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.urls]
+Documentation = "https://github.com/atifafzal786/Grepper-Utility/tree/main/doc"
+Repository = "https://github.com/atifafzal786/Grepper-Utility"
+Issues = "https://github.com/atifafzal786/Grepper-Utility/issues"
+
+[project.scripts]
+grepper = "grepper:main"
+
+[tool.setuptools]
+py-modules = ["grepper"]

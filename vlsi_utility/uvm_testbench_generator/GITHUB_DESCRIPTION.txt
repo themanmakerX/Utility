@@ -1,0 +1,2 @@
+Tkinter-based UVM testbench generator that guides you from DUT import to a complete SystemVerilog scaffold. Configure interface, transaction, agent, scoreboard, environment, sequences, tests, and top; track workflow status, preview every generated file, and export a structured project folder (src/, tb_pkg.sv, top.sv, filelist.f, manifest.json). SV!
+
