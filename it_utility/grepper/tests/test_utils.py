@@ -40,3 +40,9 @@ def test_gitignore_ignored(tmp_path):
     rules = load_gitignore_rules(str(base))
     assert gitignore_ignored("error.log", False, rules)
     assert not gitignore_ignored("README.md", False, rules)
+
+
+def test_gitignore_directory_rule_matches_directory_itself():
+    rules = [("node_modules", False, True)]
+    assert gitignore_ignored("node_modules", True, rules)
+    assert gitignore_ignored("packages/node_modules", True, rules)

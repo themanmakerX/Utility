@@ -1,4 +1,4 @@
-## Contributing to Grepper-Utility
+## Contributing to Grepper
 
 Thanks for your interest in contributing! To keep contributions focused and reviewable, please follow these steps:
 

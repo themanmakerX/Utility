@@ -143,8 +143,6 @@ def load_gitignore_rules(base_dir: str) -> list[tuple[str, bool, bool]]:
                         continue
                 dir_only = line.endswith("/")
                 pat = line.rstrip("/")
-                if dir_only:
-                    pat = pat + "/**"
                 rules.append((pat, negated, dir_only))
     except Exception:
         return []
@@ -155,12 +153,16 @@ def gitignore_ignored(rel_posix_path: str, is_dir: bool, rules: list[tuple[str, 
     if not rules:
         return False
     ignored = False
+    rel_posix_path = rel_posix_path.strip("/")
     name = rel_posix_path.rsplit("/", 1)[-1]
     for pat, negated, dir_only in rules:
         if dir_only and not is_dir:
             continue
         target = rel_posix_path if ("/" in pat) else name
-        if fnmatch.fnmatchcase(target, pat):
+        matched = fnmatch.fnmatchcase(target, pat)
+        if dir_only and "/" in pat:
+            matched = matched or target.startswith(pat.rstrip("/") + "/")
+        if matched:
             ignored = not negated
     return ignored
 
@@ -241,6 +243,8 @@ class TabState:
     processing_nb: ttk.Notebook
     processing_preview_tab: ttk.Frame
     summary_label: ttk.Label
+    progress_bar: ttk.Progressbar
+    engine_label: ttk.Label
 
     # runtime
     pause_event: threading.Event = field(default_factory=threading.Event)
@@ -248,10 +252,18 @@ class TabState:
     result_q: queue.Queue = field(default_factory=queue.Queue)
     log_q: queue.Queue = field(default_factory=queue.Queue)
     start_ts: float = 0.0
+    paused_at: float = 0.0
+    total_paused_sec: float = 0.0
+    paused_files_snapshot: int = 0
+    paused_matches_snapshot: int = 0
     files_scanned: int = 0
     matches_found: int = 0
     current_columns: tuple = field(default_factory=tuple)
     preview_highlight_re: re.Pattern | None = None
+    outcome: str = "idle"
+    last_progress_log_ts: float = 0.0
+    closed: bool = False
+    active_mode: str = "Text"
 
 
 class Grepper:
@@ -259,8 +271,9 @@ class Grepper:
         self.root = root
         self.parent = parent
         self.root.title("Grepper")
-        self.root.geometry("1280x780")
-        self.root.configure(bg='#F8FAFC')
+        self.root.geometry("1360x840")
+        self.root.minsize(1050, 680)
+        self.root.configure(bg="#EEF2FF")
 
         self.tabs: dict[str, TabState] = {}
         self.logging_enabled = tk.BooleanVar(value=False)
@@ -273,6 +286,21 @@ class Grepper:
 
         self._build_styles()
         self._build_main_ui()
+        self.root.after_idle(self._maximize_window)
+
+    def _maximize_window(self):
+        """Use the available desktop while keeping a portable fallback."""
+        try:
+            self.root.state("zoomed")
+            return
+        except Exception:
+            pass
+        try:
+            width = int(self.root.winfo_screenwidth() * 0.92)
+            height = int(self.root.winfo_screenheight() * 0.88)
+            self.root.geometry(f"{width}x{height}+20+20")
+        except Exception:
+            pass
 
     # ---------- Styles ----------
     def _build_styles(self):
@@ -285,27 +313,29 @@ class Grepper:
             pass
 
         # Base colors
-        bg = "#F8FAFC"
-        fg = "#0E1726"
-        accent = "#2563EB"   # blue-600
-        accent_hover = "#1E40AF"  # blue-800
-        muted = "#F1F5F9"    # slate-100
-        muted2 = "#E2E8F0"   # slate-200
-        border = "#D1D5DB"   # gray-300
-        success = "#16A34A"  # green-600
-        warn = "#D97706"     # amber-600
-        danger = "#DC2626"   # red-600
+        bg = "#F5F7FF"
+        fg = "#172554"
+        accent = "#5B5FEF"
+        accent_hover = "#4338CA"
+        muted = "#EEF2FF"
+        muted2 = "#DDE5FF"
+        border = "#C7D2FE"
+        success = "#059669"
+        warn = "#D97706"
+        danger = "#E11D48"
         surface = "#FFFFFF"
-        subtle = "#64748B"   # slate-500
+        subtle = "#64748B"
+        cyan = "#06B6D4"
 
         self.colors = dict(bg=bg, fg=fg, accent=accent, accent_hover=accent_hover,
                            muted=muted, muted2=muted2, border=border,
-                           success=success, warn=warn, danger=danger, surface=surface, subtle=subtle)
+                           success=success, warn=warn, danger=danger, surface=surface, subtle=subtle, cyan=cyan)
 
         style.configure("TFrame", background=bg)
         style.configure("TLabel", background=bg, foreground=fg, font=("Segoe UI", 10))
-        style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"))
-        style.configure("TEntry", fieldbackground="#FFFFFF", foreground=fg)
+        style.configure("Header.TLabel", font=("Segoe UI", 12, "bold"), foreground=accent)
+        style.configure("TEntry", fieldbackground="#FFFFFF", foreground=fg, padding=6)
+        style.configure("TCombobox", padding=5)
         style.configure("TCheckbutton", background=bg, foreground=fg, font=("Segoe UI", 10))
         style.configure("TRadiobutton", background=bg, foreground=fg, font=("Segoe UI", 10))
 
@@ -315,33 +345,50 @@ class Grepper:
                         bordercolor=border,
                         focusthickness=3,
                         focuscolor=accent,
-                        padding=(10, 6),
+                        padding=(14, 8),
                         font=("Segoe UI", 10, "bold"))
         style.map("TButton",
-                  background=[("active", muted2)],
-                  foreground=[("active", fg)])
+                  background=[("disabled", "#E2E8F0"), ("active", muted)],
+                  foreground=[("disabled", "#94A3B8"), ("active", fg)])
 
         style.configure("Accent.TButton",
                         background=accent,
                         foreground="#FFFFFF")
         style.map("Accent.TButton",
-                  background=[("active", accent_hover)],
-                  foreground=[("active", "#FFFFFF")])
+                  background=[("disabled", "#CBD5E1"), ("active", accent)],
+                  foreground=[("disabled", "#94A3B8"), ("active", "#FFFFFF")])
+
+        style.configure("Pause.TButton", background=warn, foreground="#FFFFFF")
+        style.map("Pause.TButton",
+                  background=[("disabled", "#E2E8F0"), ("active", warn)],
+                  foreground=[("disabled", "#94A3B8"), ("active", "#FFFFFF")])
+
+        style.configure("Resume.TButton", background=success, foreground="#FFFFFF")
+        style.map("Resume.TButton",
+                  background=[("disabled", "#E2E8F0"), ("active", success)],
+                  foreground=[("disabled", "#94A3B8"), ("active", "#FFFFFF")])
 
         style.configure("Danger.TButton", background=danger, foreground="#FFFFFF")
         style.map("Danger.TButton",
-                  background=[("active", "#B91C1C")],
-                  foreground=[("active", "#FFFFFF")])
+                  background=[("disabled", "#E2E8F0"), ("active", danger)],
+                  foreground=[("disabled", "#94A3B8"), ("active", "#FFFFFF")])
 
-        style.configure("TLabelframe", background=bg, bordercolor=border)
-        style.configure("TLabelframe.Label", background=bg, foreground=fg, font=("Segoe UI", 10, "bold"))
+        style.configure("TLabelframe", background=surface, bordercolor=border, relief="solid")
+        style.configure("TLabelframe.Label", background=surface, foreground=accent, font=("Segoe UI", 11, "bold"))
+        style.configure("Card.TFrame", background=surface)
+        style.configure("Engine.TLabel", background="#E0F2FE", foreground="#0369A1", padding=(10, 5), font=("Segoe UI", 9, "bold"))
+        style.configure("Success.TLabel", background="#D1FAE5", foreground="#047857", padding=(10, 5), font=("Segoe UI", 9, "bold"))
+        style.configure("TNotebook", background=bg, borderwidth=0)
+        style.configure("TNotebook.Tab", background=muted2, foreground=fg, padding=(16, 9), font=("Segoe UI", 10, "bold"))
+        style.map("TNotebook.Tab", background=[("selected", surface), ("active", "#E0E7FF")], foreground=[("selected", accent)])
+        style.configure("Horizontal.TProgressbar", background=cyan, troughcolor=muted2, bordercolor=muted2, lightcolor=cyan, darkcolor=cyan)
 
         style.configure("Treeview",
                         background=surface,
                         fieldbackground=surface,
                         foreground=fg,
                         bordercolor=border,
-                        rowheight=24,
+                        rowheight=29,
                         font=("Consolas", 10))
         style.configure("Treeview.Heading",
                         background=muted,
@@ -351,7 +398,7 @@ class Grepper:
         style.map("Treeview.Heading",
                   background=[("active", muted2)])
 
-        style.configure("Status.TLabel", background=muted, padding=(8, 6), font=("Segoe UI", 10, "bold"))
+        style.configure("Status.TLabel", background="#E0E7FF", foreground="#3730A3", padding=(10, 7), font=("Segoe UI", 10, "bold"))
 
         # Treeview selection
         try:
@@ -367,7 +414,7 @@ class Grepper:
 
         # Notebook
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        self.notebook.pack(fill="both", expand=True, padx=8, pady=(6, 8))
 
         # Shortcuts
         self.root.bind_all("<Control-n>", self._shortcut_new_tab, add="+")
@@ -415,7 +462,13 @@ class Grepper:
                 self._log_handler = None
 
     def _log_exception(self, msg: str, exc: Exception):
-        if not self.logging_enabled.get():
+        try:
+            enabled = bool(self.logging_enabled.get())
+        except Exception:
+            # Worker threads must not depend on a Tk variable read. Presence of
+            # the handler is a safe mirror of the enabled state.
+            enabled = self._log_handler is not None
+        if not enabled:
             return
         try:
             self._logger.error("%s: %s", msg, exc, exc_info=True)
@@ -567,6 +620,11 @@ class Grepper:
             pass
 
     def _on_close(self):
+        for state in self.tabs.values():
+            state.closed = True
+            if state.outcome == "running":
+                state.outcome = "cancelled"
+            state.stop_event.set()
         try:
             self._save_settings()
         finally:
@@ -635,8 +693,14 @@ class Grepper:
         real_tabs = [t for t in self.notebook.tabs() if self.notebook.tab(t, "text") != "+"]
         if len(real_tabs) <= 1:
             return
-        # remove state
-        self.tabs.pop(tab_id, None)
+        # Stop background work before destroying widgets. The queue pump checks
+        # the closed flag so already-scheduled callbacks become harmless.
+        state = self.tabs.pop(tab_id, None)
+        if state is not None:
+            state.closed = True
+            if state.outcome == "running":
+                state.outcome = "cancelled"
+            state.stop_event.set()
         self.notebook.forget(tab_id)
         self._ensure_plus_tab()
 
@@ -654,7 +718,7 @@ class Grepper:
         if plus_index > 0:
             plus_index -= 1
 
-        tab_frame = ttk.Frame(self.notebook, padding=10)
+        tab_frame = ttk.Frame(self.notebook, padding=8)
         self.notebook.insert(plus_index, tab_frame, text=f"Search {plus_index + 1}  ×")
 
         # Main content + footer (per-tab)
@@ -662,50 +726,49 @@ class Grepper:
         content.pack(fill="both", expand=True)
 
         # Options
-        options = ttk.Labelframe(content, text="Search Options", padding=10)
+        options = ttk.Labelframe(content, text="  Search workspace  ", padding=10)
         options.pack(fill="x")
 
-        # Mode radios
+        # Mode is kept on the directory row to preserve vertical workspace.
         mode_var = tk.StringVar(value="Text")
-        radios = ttk.Frame(options)
-        radios.grid(row=0, column=0, columnspan=8, sticky="w")
-        ttk.Label(radios, text="Mode: ").pack(side="left")
-        rb_text = ttk.Radiobutton(radios, text="Text in files", value="Text", variable=mode_var)
-        rb_file = ttk.Radiobutton(radios, text="File search", value="File", variable=mode_var)
-        rb_folder = ttk.Radiobutton(radios, text="Folder search", value="Folder", variable=mode_var)
-        rb_text.pack(side="left", padx=(4, 10))
-        rb_file.pack(side="left", padx=4)
-        rb_folder.pack(side="left", padx=4)
 
-        # Common controls (row 1..)
+        # Primary controls
         row = 1
-        ttk.Label(options, text="Directory:").grid(row=row, column=0, sticky="e", padx=5, pady=4)
+        ttk.Label(options, text="Folder:").grid(row=row, column=0, sticky="e", padx=5, pady=4)
         dir_entry = ttk.Entry(options, width=60)
-        dir_entry.grid(row=row, column=1, columnspan=5, sticky="we", padx=5, pady=4)
-        btn_browse = ttk.Button(options, text="Browse", command=lambda: self._pick_folder(dir_entry))
-        btn_browse.grid(row=row, column=6, padx=5, pady=4)
+        dir_entry.grid(row=row, column=1, columnspan=3, sticky="we", padx=5, pady=4)
+        btn_browse = ttk.Button(options, text="Choose folder", command=lambda: self._pick_folder(dir_entry))
+        btn_browse.grid(row=row, column=4, padx=5, pady=4)
         self._add_hover(btn_browse)
+        ttk.Label(options, text="Mode:").grid(row=row, column=5, sticky="e", padx=(10, 4), pady=4)
+        mode_combo = ttk.Combobox(options, textvariable=mode_var, values=("Text", "File", "Folder"), state="readonly", width=10)
+        mode_combo.grid(row=row, column=6, sticky="we", padx=4, pady=4)
+        ToolTip(mode_combo, "Choose whether to search file contents, filenames, or folder names.")
 
         row += 1
-        ttk.Label(options, text="Include globs:").grid(row=row, column=0, sticky="e", padx=5, pady=4)
+        include_label = ttk.Label(options, text="Include:")
+        include_label.grid(row=row, column=0, sticky="e", padx=5, pady=4)
         include_entry = ttk.Entry(options, width=40)
         include_entry.insert(0, "")
         include_entry.grid(row=row, column=1, sticky="we", padx=5, pady=4)
         ToolTip(include_entry, "Semicolon-separated glob patterns to include (e.g. *.py;*.txt). Leave blank for all.")
 
-        ttk.Label(options, text="Exclude globs:").grid(row=row, column=2, sticky="e", padx=5, pady=4)
+        exclude_label = ttk.Label(options, text="Exclude:")
+        exclude_label.grid(row=row, column=2, sticky="e", padx=5, pady=4)
         exclude_entry = ttk.Entry(options, width=40)
         exclude_entry.insert(0, ".git;__pycache__")
         exclude_entry.grid(row=row, column=3, sticky="we", padx=5, pady=4)
         ToolTip(exclude_entry, "Semicolon-separated globs to exclude (folders or files), e.g. .git;__pycache__;node_modules;*.png")
 
-        ttk.Label(options, text="Max size (MB):").grid(row=row, column=4, sticky="e", padx=5, pady=4)
+        max_size_label = ttk.Label(options, text="Max MB:")
+        max_size_label.grid(row=row, column=4, sticky="e", padx=5, pady=4)
         max_mb_entry = ttk.Entry(options, width=8)
         max_mb_entry.insert(0, "0")
         max_mb_entry.grid(row=row, column=5, sticky="we", padx=5, pady=4)
         ToolTip(max_mb_entry, "Skip files larger than this size in MB. Use 0 for unlimited.")
 
-        ttk.Label(options, text="Depth limit:").grid(row=row, column=6, sticky="e", padx=5, pady=4)
+        depth_label = ttk.Label(options, text="Depth:")
+        depth_label.grid(row=row, column=6, sticky="e", padx=5, pady=4)
         depth_entry = ttk.Entry(options, width=6)
         depth_entry.insert(0, "")  # blank = unlimited
         depth_entry.grid(row=row, column=7, sticky="we", padx=5, pady=4)
@@ -723,7 +786,7 @@ class Grepper:
         # ---- Text mode group ----
         text_group = ttk.Frame(options)
         row += 1
-        text_group.grid(row=row, column=0, columnspan=8, sticky="we", pady=(6, 0))
+        text_group.grid(row=row, column=0, columnspan=6, sticky="we", pady=(4, 0))
 
         ttk.Label(text_group, text="Search string:").grid(row=0, column=0, sticky="e", padx=5, pady=4)
         search_entry = ttk.Entry(text_group, width=60)
@@ -740,20 +803,8 @@ class Grepper:
         context_lines_var = tk.IntVar(value=2)
         first_match_per_file_var = tk.BooleanVar(value=False)
         use_ripgrep_var = tk.BooleanVar(value=bool(self._rg_path))
-        text_adv_var = tk.BooleanVar(value=False)
-
-        def toggle_text_advanced():
-            if text_adv_var.get():
-                cbx.grid()
-            else:
-                cbx.grid_remove()
-
-        adv_toggle = ttk.Checkbutton(text_group, text="More options…", variable=text_adv_var, command=toggle_text_advanced)
-        adv_toggle.grid(row=1, column=1, sticky="w", padx=5, pady=(2, 0))
-
         cbx = ttk.Frame(text_group)
-        cbx.grid(row=2, column=1, columnspan=4, sticky="w", padx=5, pady=2)
-        cbx.grid_remove()
+        cbx.grid(row=1, column=1, columnspan=5, sticky="w", padx=5, pady=2)
         ttk.Checkbutton(cbx, text="Regex", variable=chk_regex).pack(side="left", padx=5)
         ttk.Checkbutton(cbx, text="Case sensitive", variable=chk_case).pack(side="left", padx=5)
         ttk.Checkbutton(cbx, text="Whole word", variable=chk_word).pack(side="left", padx=5)
@@ -765,10 +816,40 @@ class Grepper:
         if not self._rg_path:
             cb_rg.configure(state="disabled")
 
+        # Compact accordion-style dropdown. A native menu is unsuitable here
+        # because include/exclude patterns and numeric limits need real inputs.
+        advanced_open = tk.BooleanVar(value=False)
+        advanced_common_widgets = (
+            include_label, include_entry, exclude_label, exclude_entry,
+            max_size_label, max_mb_entry, depth_label, depth_entry, flags,
+        )
+
+        def toggle_advanced_filters():
+            if advanced_open.get():
+                for widget in advanced_common_widgets:
+                    widget.grid()
+                if mode_var.get() == "Text":
+                    cbx.grid()
+                advanced_btn.configure(text="Advanced filters  ^")
+            else:
+                for widget in advanced_common_widgets:
+                    widget.grid_remove()
+                cbx.grid_remove()
+                advanced_btn.configure(text="Advanced filters  v")
+
+        def flip_advanced_filters():
+            advanced_open.set(not advanced_open.get())
+            toggle_advanced_filters()
+
+        advanced_btn = ttk.Button(options, text="Advanced filters  v", command=flip_advanced_filters)
+        advanced_btn.grid(row=1, column=7, sticky="e", padx=(8, 2))
+        ToolTip(advanced_btn, "Show include/exclude patterns, limits, hidden-file rules, regex, context, and engine options.")
+        toggle_advanced_filters()
+
         # ---- File mode group ----
         file_group = ttk.Frame(options)
         # initially hidden; placed in same grid cell as text_group
-        file_group.grid(row=row, column=0, columnspan=8, sticky="we", pady=(6, 0))
+        file_group.grid(row=row, column=0, columnspan=6, sticky="we", pady=(4, 0))
         file_group.grid_remove()
 
         ttk.Label(file_group, text="Filename pattern:").grid(row=0, column=0, sticky="e", padx=5, pady=4)
@@ -807,7 +888,7 @@ class Grepper:
 
         # ---- Folder mode group ----
         folder_group = ttk.Frame(options)
-        folder_group.grid(row=row, column=0, columnspan=8, sticky="we", pady=(6, 0))
+        folder_group.grid(row=row, column=0, columnspan=6, sticky="we", pady=(4, 0))
         folder_group.grid_remove()
 
         ttk.Label(folder_group, text="Folder name pattern:").grid(row=0, column=0, sticky="e", padx=5, pady=4)
@@ -849,39 +930,66 @@ class Grepper:
 
         # Buttons
         btns = ttk.Frame(options)
-        row += 1
-        btns.grid(row=row, column=0, columnspan=8, pady=(10, 0))
+        btns.grid(row=row, column=6, columnspan=2, sticky="e", padx=(8, 0), pady=(4, 0))
 
         # Placeholders for lambdas; we'll wire after building state
-        btn_search = ttk.Button(btns, text="Search", style="Accent.TButton")
+        btn_search = ttk.Button(btns, text="Start search", style="Accent.TButton")
         btn_search.grid(row=0, column=0, padx=(0, 8))
         self._add_hover(btn_search)
 
-        btn_pause = ttk.Button(btns, text="Pause")
+        btn_pause = ttk.Button(btns, text="Pause", style="Pause.TButton")
         btn_pause.grid(row=0, column=1, padx=(0, 8))
         self._add_hover(btn_pause)
 
-        btn_stop = ttk.Button(btns, text="Stop", style="Danger.TButton")
+        btn_stop = ttk.Button(btns, text="Cancel", style="Danger.TButton")
         btn_stop.grid(row=0, column=2, padx=(0, 8))
         self._add_hover(btn_stop)
 
         more_btn = ttk.Menubutton(btns, text="More")
         more_btn.grid(row=0, column=3, padx=(0, 0))
 
-        # Splitter: result + logs
-        paned = ttk.Panedwindow(content, orient='vertical')
+        # Wide workspace: Results and Details share the full available height.
+        paned = ttk.Panedwindow(content, orient="horizontal")
         paned.pack(fill='both', expand=True, pady=10)
 
-        result_frame = ttk.Labelframe(paned, text="Results")
-        processing_frame = ttk.Labelframe(paned, text="Processing")
-        paned.add(result_frame, weight=4)
-        paned.add(processing_frame, weight=2)
+        result_frame = ttk.Labelframe(paned, text="  Results  ")
+        processing_frame = ttk.Labelframe(paned, text="  Details  ")
+        paned.add(result_frame, weight=5)
+        paned.add(processing_frame, weight=3)
 
         # Results summary strip
         summary_bar = ttk.Frame(result_frame, padding=(6, 6, 6, 0))
         summary_bar.pack(fill="x")
         summary_label = ttk.Label(summary_bar, text="Ready.", foreground=self.colors["subtle"])
         summary_label.pack(side="left")
+        workspace_expanded = tk.BooleanVar(value=True)
+
+        def set_initial_split():
+            try:
+                width = paned.winfo_width()
+                if width > 400:
+                    paned.sashpos(0, int(width * 0.68))
+            except Exception:
+                pass
+
+        def toggle_workspace():
+            if workspace_expanded.get():
+                options.pack_forget()
+                workspace_expanded.set(False)
+                focus_btn.configure(text="Show filters")
+            else:
+                options.pack(fill="x", before=paned)
+                workspace_expanded.set(True)
+                focus_btn.configure(text="Focus workspace")
+            self.root.after(80, set_initial_split)
+
+        focus_btn = ttk.Button(summary_bar, text="Focus workspace", command=toggle_workspace)
+        focus_btn.pack(side="right", padx=(8, 0))
+        ToolTip(focus_btn, "Hide search filters to give Results and Details the full window; click again to restore them.")
+        engine_label = ttk.Label(summary_bar, text="ENGINE  READY", style="Engine.TLabel")
+        engine_label.pack(side="right")
+        progress_bar = ttk.Progressbar(summary_bar, mode="indeterminate", length=150, style="Horizontal.TProgressbar")
+        progress_bar.pack(side="right", padx=(8, 12))
 
         # Results tree
         columns_text = ('filepath', 'line_no', 'line_text')
@@ -915,8 +1023,8 @@ class Grepper:
         processing_nb.pack(fill="both", expand=True, padx=6, pady=6)
         log_tab = ttk.Frame(processing_nb, padding=6)
         preview_tab = ttk.Frame(processing_nb, padding=6)
-        processing_nb.add(log_tab, text="Logs")
         processing_nb.add(preview_tab, text="Preview")
+        processing_nb.add(log_tab, text="Activity")
 
         # Log Text
         log_wrap = ttk.Frame(log_tab)
@@ -924,7 +1032,7 @@ class Grepper:
         log_scroll = ttk.Scrollbar(log_wrap, orient="vertical")
         log_text = tk.Text(
             log_wrap,
-            height=8,
+            height=6,
             bg=self.colors["surface"],
             fg=self.colors["fg"],
             font=("Consolas", 10),
@@ -941,7 +1049,7 @@ class Grepper:
         preview_scroll = ttk.Scrollbar(preview_wrap, orient="vertical")
         preview_text = tk.Text(
             preview_wrap,
-            height=8,
+            height=6,
             bg=self.colors["surface"],
             fg=self.colors["fg"],
             font=("Consolas", 10),
@@ -1011,6 +1119,8 @@ class Grepper:
             processing_nb=processing_nb,
             processing_preview_tab=preview_tab,
             summary_label=summary_label,
+            progress_bar=progress_bar,
+            engine_label=engine_label,
             current_columns=columns_text
         )
         state.pause_event.set()
@@ -1038,6 +1148,9 @@ class Grepper:
 
         # Mode switch behavior
         def on_mode_change(*_):
+            if state.outcome == "running" and state.mode.get() != state.active_mode:
+                state.mode.set(state.active_mode)
+                return
             if state.mode.get() == "Text":
                 state.file_group.grid_remove()
                 state.folder_group.grid_remove()
@@ -1062,11 +1175,7 @@ class Grepper:
         on_mode_change()
 
         # Initial button state
-        try:
-            state.btn_stop.configure(state="disabled")
-            state.btn_pause.configure(state="disabled", text="Pause")
-        except Exception:
-            pass
+        self._set_search_controls(state, "idle")
 
         # Make columns expand nicely (favor input columns; keep labels compact)
         options.grid_columnconfigure(0, weight=0)
@@ -1095,15 +1204,32 @@ class Grepper:
 
         self._ensure_plus_tab()
         self.notebook.select(tab_id)
+        self.root.after(180, set_initial_split)
 
     # ---------- Helpers for UI ----------
     def _add_hover(self, btn: ttk.Button):
-        # Mild hover effect: swap style
-        def on_enter(_): btn.configure(style="Accent.TButton" if "New Search Tab" in btn.cget("text") else "TButton")
-        def on_leave(_): btn.configure(style="Accent.TButton" if "New Search Tab" in btn.cget("text") else "TButton")
-        # keep same; already mapped. Placeholder for custom hover if needed.
-        btn.bind("<Enter>", on_enter)
-        btn.bind("<Leave>", on_leave)
+        # Styles intentionally remain stable on hover so colour communicates
+        # application state, not pointer position.
+        return
+
+    def _set_search_controls(self, state: TabState, phase: str):
+        """Apply one consistent visual and interactive state to search actions."""
+        if phase == "running":
+            state.btn_search.configure(state="disabled", style="Accent.TButton")
+            state.btn_pause.configure(state="normal", text="Pause", style="Pause.TButton")
+            state.btn_stop.configure(state="normal", text="Cancel", style="Danger.TButton")
+        elif phase == "paused":
+            state.btn_search.configure(state="disabled", style="Accent.TButton")
+            state.btn_pause.configure(state="normal", text="Resume", style="Resume.TButton")
+            state.btn_stop.configure(state="normal", text="Cancel", style="Danger.TButton")
+        elif phase == "cancelling":
+            state.btn_search.configure(state="disabled", style="Accent.TButton")
+            state.btn_pause.configure(state="disabled", text="Pause", style="Pause.TButton")
+            state.btn_stop.configure(state="disabled", text="Cancelling", style="Danger.TButton")
+        else:
+            state.btn_search.configure(state="normal", style="Accent.TButton")
+            state.btn_pause.configure(state="disabled", text="Pause", style="Pause.TButton")
+            state.btn_stop.configure(state="disabled", text="Cancel", style="Danger.TButton")
 
     def _pick_folder(self, entry: ttk.Entry):
         d = filedialog.askdirectory()
@@ -1137,7 +1263,9 @@ class Grepper:
             cols = list(state.result_tree["columns"])
             values = [""] * len(cols)
             mode = state.mode.get()
-            if mode == "Text":
+            if state.outcome == "completed":
+                values[0] = "No matches found. Adjust the query or filters and try again."
+            elif mode == "Text":
                 values[0] = "No results yet. Enter a search string and click Search."
             elif mode == "File":
                 values[0] = "No results yet. Enter a filename pattern and click Search."
@@ -1294,8 +1422,7 @@ class Grepper:
                 tree.selection_set(iid)
                 menu.tk_popup(e.x_root, e.y_root)
         tree.bind("<Button-3>", show_menu)
-
-        # Double-click behavior wired per-mode inside open methods
+        tree.bind("<Double-1>", lambda _event: self._open_file(tree))
 
     def _toggle_content_controls(self, flag_var, entry, opts_frame):
         if flag_var.get():
@@ -1344,9 +1471,13 @@ class Grepper:
         if not directory:
             messagebox.showerror("Input Error", "Please select a directory.")
             return
+        if not os.path.isdir(directory):
+            messagebox.showerror("Input Error", "The selected directory does not exist or is not accessible.")
+            return
 
         # Mode validation
         mode = state.mode.get()
+        state.active_mode = mode
         if mode == "Text":
             pattern = state.search_entry.get()
             if not pattern:
@@ -1377,16 +1508,23 @@ class Grepper:
         state.files_scanned = 0
         state.matches_found = 0
         state.start_ts = time.time()
+        state.paused_at = 0.0
+        state.total_paused_sec = 0.0
+        state.paused_files_snapshot = 0
+        state.paused_matches_snapshot = 0
+        state.outcome = "running"
+        state.last_progress_log_ts = 0.0
         state.result_tree.delete(*state.result_tree.get_children())
         state.log_text.delete("1.0", tk.END)
         self._set_preview_text(state, "Searching…\n")
-        state.status_label.config(text="Status: Running…", foreground=self.colors["success"])
+        state.status_label.config(text="Status: Searching…", foreground=self.colors["accent"])
         try:
-            state.btn_search.configure(state="disabled")
-            state.btn_stop.configure(state="normal")
-            state.btn_pause.configure(state="normal", text="Pause")
+            state.progress_bar.start(12)
+            engine = "RIPGREP" if mode == "Text" and state.use_ripgrep_var.get() and self._rg_path else "PYTHON"
+            state.engine_label.configure(text=f"ENGINE  {engine}", style="Engine.TLabel")
         except Exception:
             pass
+        self._set_search_controls(state, "running")
 
         # Persist defaults
         self._update_settings_from_tab(state)
@@ -1408,7 +1546,7 @@ class Grepper:
                 state.chk_regex.get(), state.chk_case.get(), state.chk_word.get(),
                 state.filetype_combo.get()
             )
-            worker = threading.Thread(target=self._worker_text, args=args, daemon=True)
+            worker = threading.Thread(target=self._run_worker, args=(state, self._worker_text, args), daemon=True)
         elif mode == "File":
             gitignore_rules = load_gitignore_rules(directory) if respect_gitignore else []
             args = (
@@ -1417,7 +1555,7 @@ class Grepper:
                 state.content_filter_var.get(), state.content_entry.get(),
                 state.content_chk_regex.get(), state.content_chk_case.get(), state.content_chk_word.get()
             )
-            worker = threading.Thread(target=self._worker_file, args=args, daemon=True)
+            worker = threading.Thread(target=self._run_worker, args=(state, self._worker_file, args), daemon=True)
         else:
             gitignore_rules = load_gitignore_rules(directory) if respect_gitignore else []
             args = (
@@ -1426,28 +1564,37 @@ class Grepper:
                 state.folder_content_filter_var.get(), state.folder_content_entry.get(),
                 state.folder_content_chk_regex.get(), state.folder_content_chk_case.get(), state.folder_content_chk_word.get(),
             )
-            worker = threading.Thread(target=self._worker_folder, args=args, daemon=True)
+            worker = threading.Thread(target=self._run_worker, args=(state, self._worker_folder, args), daemon=True)
 
         worker.start()
         self._pump_queues(state)
 
     def pause_search(self, state: TabState):
+        if not state.pause_event.is_set() or state.outcome != "running":
+            return
         state.pause_event.clear()
+        state.paused_at = time.time()
+        # Freeze visible metrics immediately. A worker may have crossed one
+        # cooperative checkpoint, but that in-flight work must not make the
+        # paused UI appear active.
+        state.paused_files_snapshot = state.files_scanned
+        state.paused_matches_snapshot = state.matches_found
+        state.progress_bar.stop()
         state.status_label.config(text="Status: Paused", foreground=self.colors["warn"])
         state.log_q.put("Paused.\n")
-        try:
-            state.btn_pause.configure(text="Resume")
-        except Exception:
-            pass
+        self._set_search_controls(state, "paused")
 
     def resume_search(self, state: TabState):
+        if state.pause_event.is_set() or state.outcome != "running":
+            return
+        if state.paused_at > 0:
+            state.total_paused_sec += max(0.0, time.time() - state.paused_at)
+            state.paused_at = 0.0
         state.pause_event.set()
+        state.progress_bar.start(12)
         state.status_label.config(text="Status: Running…", foreground=self.colors["success"])
         state.log_q.put("Resumed.\n")
-        try:
-            state.btn_pause.configure(text="Pause")
-        except Exception:
-            pass
+        self._set_search_controls(state, "running")
 
     def toggle_pause_resume(self, state: TabState):
         if state.stop_event.is_set():
@@ -1458,29 +1605,36 @@ class Grepper:
             self.resume_search(state)
 
     def stop_search(self, state: TabState):
+        state.outcome = "cancelled"
         state.stop_event.set()
-        state.status_label.config(text="Status: Stopping…", foreground=self.colors["danger"])
-        state.log_q.put("Stopping…\n")
-        try:
-            state.btn_stop.configure(state="disabled")
-            state.btn_pause.configure(state="disabled")
-        except Exception:
-            pass
+        state.progress_bar.stop()
+        state.status_label.config(text="Status: Cancelling…", foreground=self.colors["danger"])
+        state.log_q.put("Cancellation requested…\n")
+        self._set_search_controls(state, "cancelling")
 
     def clear_results(self, state: TabState):
         state.result_tree.delete(*state.result_tree.get_children())
+        if state.outcome == "running":
+            self._set_preview_text(state, "Searching…\n")
+            state.log_q.put("Visible results cleared; search is still running.\n")
+            return
         state.status_label.config(text="Status: Cleared → Idle", foreground=self.colors["fg"])
         self._set_preview_text(state, "Select a result to preview it.\n")
         self._show_empty_results(state)
         state.log_q.put("Cleared results.\n")
         state.files_scanned = 0
         state.matches_found = 0
+        state.paused_at = 0.0
+        state.total_paused_sec = 0.0
+        state.paused_files_snapshot = 0
+        state.paused_matches_snapshot = 0
+        state.outcome = "idle"
         try:
-            state.btn_search.configure(state="normal")
-            state.btn_stop.configure(state="disabled")
-            state.btn_pause.configure(state="disabled", text="Pause")
+            state.progress_bar.stop()
+            state.engine_label.configure(text="ENGINE  READY", style="Engine.TLabel")
         except Exception:
             pass
+        self._set_search_controls(state, "idle")
 
     def clear_logs(self, state: TabState):
         try:
@@ -1509,17 +1663,24 @@ class Grepper:
                 else: headers.append(c)
             w.writerow(headers)
             for iid in state.result_tree.get_children():
+                if iid == "__empty__":
+                    continue
                 w.writerow(state.result_tree.item(iid)['values'])
         state.status_label.config(text=f"Saved CSV → {path}", foreground=self.colors["fg"])
 
     # ---------- Queue pump ----------
     def _pump_queues(self, state: TabState):
+        if state.closed:
+            return
         drained = False
 
-        max_results_per_tick = 800
-        max_logs_per_tick = 300
+        # Smaller batches keep resizing, scrolling, and cancellation responsive
+        # even when a fast rg search produces thousands of matches at once.
+        max_results_per_tick = 300
+        max_logs_per_tick = 100
 
-        if state.pause_event.is_set():
+        # On stop/cancel, always flush queued items even when the search was paused.
+        if state.pause_event.is_set() or state.stop_event.is_set():
             idx = len(state.result_tree.get_children())
             if "__empty__" in state.result_tree.get_children():
                 try:
@@ -1552,16 +1713,20 @@ class Grepper:
                 state.log_text.see(tk.END)
 
         # Update status metrics
-        elapsed = max(0.0, time.time() - state.start_ts)
-        fps = (state.files_scanned / elapsed) if elapsed > 0 else 0.0
+        paused = not state.pause_event.is_set() and state.paused_at > 0
+        metric_ts = state.paused_at if paused else time.time()
+        elapsed = max(0.0, metric_ts - state.start_ts - state.total_paused_sec)
+        display_files = state.paused_files_snapshot if paused else state.files_scanned
+        display_matches = state.paused_matches_snapshot if paused else state.matches_found
+        fps = (display_files / elapsed) if elapsed > 0 else 0.0
         mode = state.mode.get()
         scanned_label = "Folders" if mode == "Folder" else "Files"
         match_label = "Matches" if mode == "Text" else ("Folders matched" if mode == "Folder" else "Files matched")
         rate_label = "folders/s" if mode == "Folder" else "files/s"
-        summary = f"{scanned_label}: {state.files_scanned}   {match_label}: {state.matches_found}   Elapsed: {elapsed:.1f}s   {fps:.1f} {rate_label}"
+        summary = f"{scanned_label}: {display_files}   {match_label}: {display_matches}   Elapsed: {elapsed:.1f}s   {fps:.1f} {rate_label}"
         label = (f"Status: {'Paused' if not state.pause_event.is_set() else 'Running'} | "
-                 f"{scanned_label}: {state.files_scanned} | "
-                 f"{match_label}: {state.matches_found} | "
+                 f"{scanned_label}: {display_files} | "
+                 f"{match_label}: {display_matches} | "
                  f"Elapsed: {elapsed:.1f}s | {fps:.1f} {rate_label}")
         try:
             state.summary_label.configure(text=summary)
@@ -1572,18 +1737,56 @@ class Grepper:
 
         # Continue pumping until fully stopped and queues drained
         has_backlog = (not state.result_q.empty()) or (not state.log_q.empty())
-        if not state.stop_event.is_set() or drained:
-            self.root.after(1 if has_backlog else 120, lambda: self._pump_queues(state))
+        if not state.stop_event.is_set() or drained or has_backlog:
+            self.root.after(8 if has_backlog else 120, lambda: self._pump_queues(state))
         else:
-            state.status_label.config(text="Status: Stopped", foreground=self.colors["danger"])
             try:
-                state.btn_search.configure(state="normal")
-                state.btn_stop.configure(state="disabled")
-                state.btn_pause.configure(state="disabled", text="Pause")
+                state.progress_bar.stop()
             except Exception:
                 pass
+            if state.outcome == "cancelled":
+                final_text, final_color = "Status: Cancelled", self.colors["danger"]
+                try:
+                    state.engine_label.configure(text="SEARCH  CANCELLED", style="Engine.TLabel")
+                except Exception:
+                    pass
+            elif state.outcome == "failed":
+                final_text, final_color = "Status: Failed — see Activity", self.colors["danger"]
+                try:
+                    state.engine_label.configure(text="SEARCH  FAILED", style="Engine.TLabel")
+                except Exception:
+                    pass
+            else:
+                state.outcome = "completed"
+                final_text, final_color = "Status: Completed", self.colors["success"]
+                try:
+                    state.engine_label.configure(text="SEARCH  COMPLETE", style="Success.TLabel")
+                except Exception:
+                    pass
+            if state.matches_found == 0:
+                self._show_empty_results(state)
+            state.status_label.config(text=final_text, foreground=final_color)
+            self._set_search_controls(state, "idle")
 
     # ---------- Workers ----------
+    def _run_worker(self, state: TabState, worker_fn, args):
+        """Guarantee that unexpected worker failures always release the UI."""
+        try:
+            worker_fn(*args)
+        except Exception as exc:
+            if state.outcome != "cancelled":
+                state.outcome = "failed"
+            state.log_q.put(f"Search failed: {exc}\n")
+            self._log_exception("Unhandled search worker error", exc)
+            state.stop_event.set()
+
+    def _queue_scan_progress(self, state: TabState, root: str):
+        """Keep activity useful without flooding Tk with one log entry per directory."""
+        now = time.monotonic()
+        if now - state.last_progress_log_ts >= 0.35:
+            state.last_progress_log_ts = now
+            state.log_q.put(f"Scanning: {root}\n")
+
     def _walk_with_depth(self, base_dir: str, depth_limit, *, skip_hidden: bool, gitignore_rules: list[tuple[str, bool, bool]]):
         base_dir = os.path.abspath(base_dir)
         base_depth = base_dir.rstrip(os.sep).count(os.sep)
@@ -1645,6 +1848,7 @@ class Grepper:
                 def is_match(line): return pat.search(line) is not None
             except re.error as e:
                 state.log_q.put(f"Invalid regex: {e}\n")
+                state.outcome = "failed"
                 state.stop_event.set()
                 return
         else:
@@ -1661,7 +1865,7 @@ class Grepper:
             if exclude_globs:
                 dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, g) for g in exclude_globs)]
 
-            state.log_q.put(f"Scanning: {root}\n")
+            self._queue_scan_progress(state, root)
 
             for fname in files:
                 if state.stop_event.is_set(): break
@@ -1671,7 +1875,7 @@ class Grepper:
                     time.sleep(0.05)
 
                 # File type filter
-                if filetype != "All" and not fname.endswith(filetype):
+                if filetype != "All" and not fname.lower().endswith(filetype.lower()):
                     continue
                 # include/exclude globs
                 if include_globs and not any(fnmatch.fnmatch(fname, g) for g in include_globs):
@@ -1711,6 +1915,8 @@ class Grepper:
                 except Exception as e:
                     self._log_exception(f"Error reading {fpath}", e)
 
+        if state.outcome == "running":
+            state.outcome = "completed"
         state.stop_event.set()
 
     def _worker_text_ripgrep(
@@ -1781,6 +1987,7 @@ class Grepper:
             )
         except Exception as e:
             state.log_q.put(f"Failed to start rg: {e}\n")
+            state.outcome = "failed"
             state.stop_event.set()
             return
 
@@ -1837,6 +2044,8 @@ class Grepper:
         except Exception:
             pass
 
+        if state.outcome == "running":
+            state.outcome = "completed"
         state.stop_event.set()
 
     def _worker_file(self, state: TabState, directory, include_globs, exclude_globs, max_mb, depth_limit, skip_hidden, gitignore_rules,
@@ -1850,6 +2059,7 @@ class Grepper:
                 def match_name(name): return rname.search(name) is not None
             except re.error as e:
                 state.log_q.put(f"Invalid filename regex: {e}\n")
+                state.outcome = "failed"
                 state.stop_event.set()
                 return
         else:
@@ -1869,6 +2079,7 @@ class Grepper:
                     def match_content(line): return rc.search(line) is not None
                 except re.error as e:
                     state.log_q.put(f"Invalid content regex: {e}\n")
+                    state.outcome = "failed"
                     state.stop_event.set()
                     return
             else:
@@ -1887,7 +2098,7 @@ class Grepper:
             if exclude_globs:
                 dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, g) for g in exclude_globs)]
 
-            state.log_q.put(f"Scanning: {root}\n")
+            self._queue_scan_progress(state, root)
 
             for fname in files:
                 if state.stop_event.is_set(): break
@@ -1946,6 +2157,8 @@ class Grepper:
                     mtime = time.time()
                 state.result_q.put((fpath, fmt_size(size), fmt_time(mtime), "Y" if content_filter_on else "—"))
 
+        if state.outcome == "running":
+            state.outcome = "completed"
         state.stop_event.set()
 
     def _worker_folder(
@@ -1979,6 +2192,7 @@ class Grepper:
                 def match_folder(name): return rfolder.search(name) is not None
             except re.error as e:
                 state.log_q.put(f"Invalid folder regex: {e}\n")
+                state.outcome = "failed"
                 state.stop_event.set()
                 return
         else:
@@ -2000,6 +2214,7 @@ class Grepper:
                     def match_content(line): return rc.search(line) is not None
                 except re.error as e:
                     state.log_q.put(f"Invalid content regex: {e}\n")
+                    state.outcome = "failed"
                     state.stop_event.set()
                     return
             else:
@@ -2082,7 +2297,7 @@ class Grepper:
             if exclude_globs:
                 dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, g) for g in exclude_globs)]
 
-            state.log_q.put(f"Scanning: {root}\n")
+            self._queue_scan_progress(state, root)
 
             for dname in list(dirs):
                 if state.stop_event.is_set():
@@ -2107,6 +2322,8 @@ class Grepper:
                     mtime = time.time()
                 state.result_q.put((folder_path, fmt_time(mtime), "Y" if content_filter_on else "—", str(files_seen)))
 
+        if state.outcome == "running":
+            state.outcome = "completed"
         state.stop_event.set()
 
     # ---------- Tree actions ----------
@@ -2157,9 +2374,11 @@ class Grepper:
 
     def _open_file(self, tree: ttk.Treeview):
         sel = tree.selection()
-        if not sel:
+        if not sel or sel[0] == "__empty__":
             return
         vals = tree.item(sel[0], "values")
+        if not vals or not vals[0]:
+            return
         fp = vals[0]
         try:
             line_no = int(vals[1])
@@ -2185,4 +2404,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
