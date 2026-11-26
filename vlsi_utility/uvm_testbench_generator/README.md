@@ -23,7 +23,7 @@ python testbench_generator.py
 
 Badges
 
-- Build: [![CI](https://github.com/atifafzal786/UVM-Testbench-Generator/actions/workflows/python-ci.yml/badge.svg)](https://github.com/atifafzal786/UVM-Testbench-Generator/actions)
+- Build: [![CI](https://github.com/themanmakerX/Utility/actions/workflows/python-ci.yml/badge.svg)](https://github.com/themanmakerX/Utility/actions)
 
 Docs & support
 

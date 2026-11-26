@@ -1,6 +1,6 @@
 ## Contributor Covenant Code of Conduct
 
-Everyone interacting in the Grepper-Utility project's codebases, issue trackers, chat rooms and mailing lists is expected to follow this code of conduct.
+Everyone interacting in the Grepper project's codebases, issue trackers, chat rooms and mailing lists is expected to follow this code of conduct.
 
 - Be respectful and considerate.
 - Use welcoming and inclusive language.

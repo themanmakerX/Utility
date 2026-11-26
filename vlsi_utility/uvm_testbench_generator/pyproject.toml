@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = ["pillow>=10"]
 license = { file = "LICENSE" }
-authors = [ { name = "atifafzal786" } ]
+authors = [ { name = "Atif Afzal" } ]
 keywords = ["uvm","systemverilog","testbench","generator","tkinter"]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -19,8 +19,8 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/atifafzal786/UVM-Testbench-Generator"
-Documentation = "https://github.com/atifafzal786/UVM-Testbench-Generator/tree/main"
+Repository = "https://github.com/themanmakerX/Utility"
+Documentation = "https://github.com/themanmakerX/Utility/tree/main/vlsi_utility/uvm_testbench_generator"
 
 [project.scripts]
 tbgen = "uvm_testbench_generator.app:main"
